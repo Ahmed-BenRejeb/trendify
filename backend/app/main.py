@@ -1,0 +1,867 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from app.schemas import PlannerRequest, AnswersRequest
+from app.planner_agent import PlannerAgent, PlannerInput
+from app.social_media_posting import router as social_media_router
+from pydantic import BaseModel
+import os
+import uuid
+from PIL import Image, ImageDraw, ImageFont
+import base64
+from io import BytesIO
+from datetime import datetime
+
+app = FastAPI()
+
+# Fix CORS to include the React frontend port
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://127.0.0.1:3000",
+        "http://localhost:5173", 
+        "http://127.0.0.1:5173"
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["*"],
+)
+
+# Register social media router
+app.include_router(social_media_router, prefix="/social")
+
+agent = PlannerAgent()
+
+# Add missing ContentRequest model for the new endpoints
+class ContentRequest(BaseModel):
+    content_type: str = ""
+    category: str = ""
+    platform: str = ""
+    audience: str = ""
+    tone: str = ""
+    description: str = ""
+    sharing_enabled: bool = False
+    sharing_settings: dict = None
+
+def _create_simple_placeholder(category: str, prompt: str) -> str:
+    """Create a simple placeholder image and return as base64"""
+    try:
+        img = Image.new('RGB', (800, 600), color='#f8f9fa')
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            title_font = ImageFont.truetype("arial.ttf", 32)
+            heading_font = ImageFont.truetype("arial.ttf", 24)
+            content_font = ImageFont.truetype("arial.ttf", 18)
+            small_font = ImageFont.truetype("arial.ttf", 14)
+        except:
+            title_font = ImageFont.load_default()
+            heading_font = ImageFont.load_default()
+            content_font = ImageFont.load_default()
+            small_font = ImageFont.load_default()
+        
+        # Create gradient background
+        for y in range(600):
+            r = int(248 + (7 * y / 600))
+            g = int(249 + (6 * y / 600))  
+            b = int(250 + (5 * y / 600))
+            draw.line([(0, y), (800, y)], fill=(r, g, b))
+        
+        # Add decorative elements
+        draw.rectangle([0, 0, 800, 80], fill='#667eea')
+        draw.rectangle([0, 520, 800, 600], fill='#764ba2')
+        
+        # Add main title
+        title = "🎨 EcoLens AI Generated Image"
+        title_bbox = draw.textbbox((0, 0), title, font=title_font)
+        title_width = title_bbox[2] - title_bbox[0]
+        draw.text(((800 - title_width) // 2, 25), title, fill='white', font=title_font)
+        
+        # Add category badge
+        draw.rectangle([50, 120, 300, 160], fill='#28a745', outline='#1e7e34', width=2)
+        draw.text((60, 132), f"📂 {category}", fill='white', font=heading_font)
+        
+        # Add content description
+        content_y = 200
+        draw.text((50, content_y), "📝 Generated Content:", fill='#343a40', font=heading_font)
+        
+        # Word wrap and display content
+        if prompt and prompt.strip():
+            words = prompt.split()
+            lines = []
+            current_line = []
+            
+            for word in words:
+                test_line = ' '.join(current_line + [word])
+                if len(test_line) > 50:  # Wrap at ~50 characters
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        lines.append(word)
+                else:
+                    current_line.append(word)
+            
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            # Draw content lines
+            y_offset = content_y + 40
+            for i, line in enumerate(lines[:8]):  # Max 8 lines
+                draw.text((70, y_offset + (i * 25)), f"• {line}", fill='#495057', font=content_font)
+        else:
+            draw.text((70, content_y + 40), "• Professional marketing content", fill='#495057', font=content_font)
+            draw.text((70, content_y + 65), "• Tailored for your business needs", fill='#495057', font=content_font)
+            draw.text((70, content_y + 90), "• AI-powered visual generation", fill='#495057', font=content_font)
+        
+        # Add feature highlights
+        feature_y = 420
+        draw.text((50, feature_y), "✨ Features:", fill='#6c757d', font=heading_font)
+        features = [
+            "🎯 Targeted for your industry",
+            "🚀 Ready for social media",
+            "💡 Professional design"
+        ]
+        
+        for i, feature in enumerate(features):
+            draw.text((70, feature_y + 30 + (i * 25)), feature, fill='#6c757d', font=content_font)
+        
+        # Add footer
+        footer_text = f"Generated by EcoLens AI • {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        footer_bbox = draw.textbbox((0, 0), footer_text, font=small_font)
+        footer_width = footer_bbox[2] - footer_bbox[0]
+        draw.text(((800 - footer_width) // 2, 550), footer_text, fill='white', font=small_font)
+        
+        # Add success indicator
+        draw.rectangle([650, 120, 750, 160], fill='#17a2b8', outline='#138496', width=2)
+        draw.text((660, 132), "✅ SUCCESS", fill='white', font=content_font)
+        
+        # Convert to base64
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        return img_str
+        
+    except Exception as e:
+        print(f"❌ Enhanced placeholder creation failed: {e}")
+        return None
+
+# Add missing root endpoint
+@app.get("/")
+async def root():
+    return {
+        "message": "EcoLens Backend API", 
+        "status": "running", 
+        "version": "1.0",
+        "endpoints": ["/generate", "/generate-with-answers", "/save-image"]
+    }
+
+# Import the ImageGenerator
+try:
+    from app.image_generator import ImageGenerator
+    image_generator = ImageGenerator()
+    print("✅ ImageGenerator with HuggingFace initialized")
+except ImportError as e:
+    print(f"⚠️ Could not import ImageGenerator: {e}")
+    image_generator = None
+
+# Import the VideoGenerator
+try:
+    from app.video_generator import VideoGenerator
+    video_generator = VideoGenerator()
+    print("✅ VideoGenerator initialized")
+except ImportError as e:
+    print(f"⚠️ Could not import VideoGenerator: {e}")
+    video_generator = None
+
+# Add the new generate endpoint that the frontend expects
+@app.post("/generate")
+async def generate_content_new(request: ContentRequest):
+    try:
+        print(f"📝 New endpoint - Generating content for: {request.category}")
+        print(f"🔍 Content type: {request.content_type}")
+        print(f"🔄 Auto-sharing enabled: {request.sharing_enabled}")
+
+        # Detect content type
+        is_marketing_image = (
+            "marketing images" in request.content_type.lower()
+            or "images" in request.content_type.lower()
+        )
+        is_video_content = (
+            "video" in request.content_type.lower()
+            or "videos" in request.content_type.lower()
+        )
+        is_text_content = not is_marketing_image and not is_video_content
+
+        # Generate text content using PlannerAgent (always call)
+        user_input = PlannerInput(
+            business_name=request.category,
+            output_type="gemini",
+            periodic_content=False,
+            additional_prompt=request.description or ""
+        )
+        report = agent.analyze_prompt(user_input)
+        if report.clarification_questions:
+            return {
+                "status": "clarification_needed",
+                "questions": report.clarification_questions,
+                "summary": report.task_summary
+            }
+        text_result = agent.generate_content(user_input)
+        marketing_text = text_result["content"]
+
+        # Generate image if requested
+        image_data = None
+        image_source = None
+        image_prompt = None
+        if is_marketing_image:
+            if image_generator:
+                try:
+                    ai_prompt = image_generator.create_image_prompt(request.category, request.description or "professional marketing content")
+                    img_result = image_generator.generate_image(ai_prompt)
+                    if img_result and img_result.get("image_base64"):
+                        image_data = img_result["image_base64"]
+                        image_source = img_result.get("source", "huggingface")
+                        image_prompt = ai_prompt
+                except Exception as e:
+                    image_data = None
+            if not image_data:
+                image_data = _create_simple_placeholder(request.category, request.description)
+                image_source = "enhanced_placeholder"
+                image_prompt = request.description or "professional marketing content"
+
+        # Generate video if requested
+        video_data = None
+        video_source = None
+        video_prompt = None
+        if is_video_content:
+            if video_generator:
+                try:
+                    # Determine video style based on platform
+                    platform = request.platform.lower() if request.platform else "general"
+                    if "linkedin" in platform:
+                        video_style = "professional"
+                    elif "tiktok" in platform or "instagram" in platform:
+                        video_style = "creative"
+                    else:
+                        video_style = "marketing"
+                    
+                    video_prompt = video_generator.create_video_prompt(
+                        request.category, 
+                        request.description or "professional marketing video",
+                        video_style
+                    )
+                    video_result = video_generator.generate_video(video_prompt, duration=15)
+                    
+                    if video_result and video_result.get("video_base64"):
+                        video_data = video_result["video_base64"]
+                        video_source = video_result.get("source", "huggingface")
+                except Exception as e:
+                    print(f"❌ Video generation error: {e}")
+                    video_data = None
+
+        # Build response
+        response = {
+            "content": marketing_text,
+            "category": request.category,
+            "type": text_result["type"],
+            "summary": report.task_summary
+        }
+        
+        if image_data:
+            response["image_data"] = image_data
+            response["image_source"] = image_source
+            response["image_prompt"] = image_prompt
+            
+        if video_data:
+            response["video_data"] = video_data
+            response["video_source"] = video_source
+            response["video_prompt"] = video_prompt
+            response["type"] = "video"  # Override type if video is generated
+
+        # Schedule auto-sharing if enabled
+        scheduled_jobs = []
+        if request.sharing_enabled and request.sharing_settings:
+            response_for_sharing = dict(response)
+            response_for_sharing["content"] = marketing_text
+            scheduled_jobs = schedule_auto_sharing(response_for_sharing, request.sharing_settings)
+        response["scheduled_posts"] = scheduled_jobs
+        return response
+
+    except Exception as e:
+        print(f"❌ Error in new generate endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating content: {str(e)}")
+
+# Add video-specific endpoint
+@app.post("/generate-video")
+async def generate_video_endpoint(request: dict):
+    """Generate video content specifically"""
+    try:
+        business_type = request.get("business_type", "General Business")
+        description = request.get("description", "professional marketing video")
+        platform = request.get("platform", "instagram")
+        duration = request.get("duration", 15)
+        
+        if not video_generator:
+            raise HTTPException(status_code=503, detail="Video generator not available")
+        
+        # Generate platform-specific video
+        if platform in ["instagram", "tiktok", "youtube", "linkedin"]:
+            result = video_generator.generate_social_media_video(description, platform)
+        else:
+            prompt = video_generator.create_video_prompt(business_type, description)
+            result = video_generator.generate_video(prompt, duration)
+        
+        return {
+            "success": result["success"],
+            "video_data": result["video_base64"],
+            "source": result["source"],
+            "format": result["format"],
+            "duration": result["duration"],
+            "platform": platform
+        }
+        
+    except Exception as e:
+        print(f"❌ Error generating video: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating video: {str(e)}")
+
+# Add video download endpoint
+@app.post("/save-video")
+async def save_video(request: dict):
+    """Save and download generated video"""
+    try:
+        video_data = request.get("video_data")
+        filename = request.get("filename", "ecolens_video.mp4")
+        
+        if not video_data:
+            raise HTTPException(status_code=400, detail="No video data provided")
+        
+        # Create videos directory
+        videos_dir = "generated_videos"
+        if not os.path.exists(videos_dir):
+            os.makedirs(videos_dir)
+        
+        # Save video file
+        video_bytes = base64.b64decode(video_data)
+        filepath = os.path.join(videos_dir, filename)
+        
+        with open(filepath, 'wb') as f:
+            f.write(video_bytes)
+        
+        return FileResponse(
+            filepath,
+            media_type='video/mp4',
+            filename=filename,
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        print(f"❌ Error saving video: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error saving video: {str(e)}")
+
+# Keep the original generate endpoint for backward compatibility
+@app.post("/generate-original")
+def generate_content_original(payload: PlannerRequest):
+    user_input = PlannerInput(
+        business_name=payload.business_name,
+        output_type=payload.output_type,
+        periodic_content=payload.periodic_content,
+        additional_prompt=payload.additional_prompt
+    )
+    report = agent.analyze_prompt(user_input)
+
+    if report.clarification_questions:
+        return {
+            "status": "clarification_needed",
+            "questions": report.clarification_questions,
+            "summary": report.task_summary
+        }
+
+    result = agent.generate_content(user_input)
+    return {
+        "status": "done",
+        "content_type": result["type"],
+        "content": result["content"],
+        "summary": report.task_summary,
+        **({"image_prompt": result["prompt"]} if result["type"] == "image" else {}),
+        **({"image_data": result.get("image_data")} if result["type"] == "image" and result.get("image_data") else {})
+    }
+
+# Update the generate-with-answers endpoint to handle the new format
+@app.post("/generate-with-answers")
+async def generate_with_answers_new(request: dict):
+    try:
+        # Accept both dict and list for answers
+        answers = request.get("answers", {})
+        # If the request itself is a list, treat it as answers
+        if isinstance(request, list):
+            answers = {}
+            for ans in request:
+                if isinstance(ans, dict):
+                    answers.update(ans)
+        elif isinstance(answers, list):
+            merged = {}
+            for ans in answers:
+                if isinstance(ans, dict):
+                    merged.update(ans)
+            answers = merged
+
+        category = answers.get("category", "General")
+        description = answers.get("description", "")
+
+        print(f"📝 Generating content with answers for: {category}")
+
+        # Use PlannerAgent for text/posts with grmini output type
+        user_input = PlannerInput(
+            business_name=category,
+            output_type="gemini",
+            periodic_content=False,
+            additional_prompt=description
+        )
+        report = agent.analyze_prompt(user_input)
+        if report.clarification_questions:
+            return {
+                "status": "clarification_needed",
+                "questions": report.clarification_questions,
+                "summary": report.task_summary,
+                "type": "clarification",
+                "category": category,
+                "content": "Clarification required"
+            }
+        result = agent.generate_content(user_input)
+        # Ensure type is always present and default to "text" if missing
+        result_type = result.get("type", "text")
+        result_content = result.get("content", "")
+        return {
+            "content": result_content,
+            "category": category,
+            "type": result_type,
+            "summary": report.task_summary
+        }
+
+    except Exception as e:
+        print(f"❌ Error generating content with answers: {str(e)}")
+        return {
+            "content": f"Error: {str(e)}",
+            "type": "text",
+            "category": "Error"
+        }
+
+# Add save-image endpoint for download functionality
+@app.post("/save-image")
+async def save_image(request: dict):
+    try:
+        prompt = request.get("prompt", "Generated Image")
+        category = request.get("category", "AI Generated")
+        
+        # Create images directory
+        images_dir = "generated_images"
+        if not os.path.exists(images_dir):
+            os.makedirs(images_dir)
+        
+        # Generate image
+        image_data = _create_simple_placeholder(category, prompt)
+        
+        if image_data:
+            # Save as file
+            image_bytes = base64.b64decode(image_data)
+            img = Image.open(BytesIO(image_bytes))
+            
+            filename = f"ecolens_generated_{uuid.uuid4().hex[:8]}.png"
+            filepath = os.path.join(images_dir, filename)
+            img.save(filepath, 'PNG')
+            
+            return FileResponse(
+                filepath, 
+                media_type='image/png',
+                filename=filename,
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Failed to generate image")
+        
+    except Exception as e:
+        print(f"❌ Error in save-image: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+def process_sharing_settings(sharing_settings: dict):
+    """Process and validate sharing settings from frontend"""
+    print(f"\n🔧 === AUTO-SHARING SETTINGS ANALYSIS ===")
+    
+    for platform_id, settings in sharing_settings.items():
+        if not settings.get('enabled', False):
+            continue
+            
+        print(f"\n📱 Platform: {platform_id.upper()}")
+        print(f"   ✅ Enabled: {settings.get('enabled')}")
+        print(f"   📅 Frequency: {settings.get('frequency')}")
+        print(f"   ⏰ Time: {settings.get('time')}")
+        
+        frequency = settings.get('frequency')
+        time_setting = settings.get('time')
+        
+        if frequency == 'daily':
+            print(f"   📆 Schedule: Every day at {time_setting}")
+            
+        elif frequency == 'weekly':
+            print(f"   📆 Schedule: Once a week at {time_setting}")
+            
+        elif frequency == 'custom':
+            days = settings.get('days', [])
+            print(f"   📆 Schedule: Custom days at {time_setting}")
+            print(f"   📅 Selected days: {', '.join(days)}")
+            
+            # Validate days
+            valid_days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+            invalid_days = [day for day in days if day not in valid_days]
+            if invalid_days:
+                print(f"   ⚠️ Invalid days found: {invalid_days}")
+            else:
+                print(f"   ✅ All days are valid")
+        
+        # Validate time format
+        try:
+            from datetime import datetime
+            datetime.strptime(time_setting, '%H:%M')
+            print(f"   ✅ Time format is valid: {time_setting}")
+        except ValueError:
+            print(f"   ❌ Invalid time format: {time_setting}")
+    
+    print(f"\n🔧 === END SETTINGS ANALYSIS ===\n")
+
+def schedule_auto_sharing(content_data: dict, sharing_settings: dict):
+    """Schedule content sharing based on settings and return job info"""
+    print(f"\n🚀 === SCHEDULING AUTO-SHARING ===")
+    
+    scheduled_jobs = []
+    
+    for platform_id, settings in sharing_settings.items():
+        if not settings.get('enabled', False):
+            continue
+            
+        print(f"\n📱 Scheduling for {platform_id}:")
+        
+        frequency = settings.get('frequency')
+        time_setting = settings.get('time')
+        
+        if platform_id.lower() == 'linkedin':
+            # Pass image_data if present
+            post_args = [content_data.get('content', ''), content_data.get('image_data'), content_data.get('image_source')]
+            if frequency == 'daily':
+                print(f"   🔄 Setting up daily LinkedIn posting at {time_setting}")
+                schedule_daily_post('linkedin', content_data, time_setting, post_args)
+                scheduled_jobs.append({
+                    "platform": "LinkedIn",
+                    "frequency": "daily",
+                    "time": time_setting,
+                    "status": "scheduled"
+                })
+                
+            elif frequency == 'weekly':
+                print(f"   🔄 Setting up weekly LinkedIn posting at {time_setting}")
+                schedule_weekly_post('linkedin', content_data, time_setting, post_args)
+                scheduled_jobs.append({
+                    "platform": "LinkedIn", 
+                    "frequency": "weekly",
+                    "time": time_setting,
+                    "status": "scheduled"
+                })
+                
+            elif frequency == 'custom':
+                days = settings.get('days', [])
+                print(f"   🔄 Setting up custom LinkedIn posting on {days} at {time_setting}")
+                schedule_custom_post('linkedin', content_data, time_setting, days, post_args)
+                scheduled_jobs.append({
+                    "platform": "LinkedIn",
+                    "frequency": "custom",
+                    "time": time_setting,
+                    "days": days,
+                    "status": "scheduled"
+                })
+    
+    print(f"\n🚀 === SCHEDULING COMPLETE ===\n")
+    return scheduled_jobs
+
+def schedule_custom_post(platform: str, content: dict, time: str, days: list, post_args=None):
+    """Schedule custom day posting for LinkedIn"""
+    from datetime import datetime, timedelta
+    
+    try:
+        # Map day names to weekday numbers
+        day_mapping = {
+            'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+            'friday': 4, 'saturday': 5, 'sunday': 6
+        }
+        
+        # Parse the time
+        hour, minute = map(int, time.split(':'))
+        
+        print(f"\n🚀 === SCHEDULING CUSTOM POSTS ===")
+        print(f"📱 Platform: {platform}")
+        print(f"⏰ Time: {time} ({hour}:{minute:02d})")
+        print(f"📅 Days: {days}")
+        print(f"📝 Content: {content.get('content', '')[:100]}...")
+        
+        # Schedule for each selected day
+        for day_name in days:
+            if day_name.lower() not in day_mapping:
+                print(f"   ⚠️ Invalid day: {day_name}")
+                continue
+                
+            target_weekday = day_mapping[day_name.lower()]
+            
+            # Calculate next occurrence of this day
+            now = datetime.now()
+            days_ahead = target_weekday - now.weekday()
+            
+            # If it's today and the time hasn't passed yet, schedule for today
+            if days_ahead == 0:
+                next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if next_run <= now:
+                    days_ahead = 7  # Schedule for next week
+                    next_run = (now + timedelta(days=7)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+            else:
+                if days_ahead < 0:  # Target day already happened this week
+                    days_ahead += 7
+                next_run = (now + timedelta(days=days_ahead)).replace(
+                    hour=hour, minute=minute, second=0, microsecond=0
+                )
+            
+            print(f"   📅 Next {day_name}: {next_run}")
+            
+            # Import scheduler from social_media_posting
+            from app.social_media_posting import scheduler, post_to_linkedin, LINKEDIN_ACCESS_TOKEN
+
+            # Schedule the recurring job for this specific day
+            if platform.lower() == 'linkedin':
+                job_id = f"custom_linkedin_{day_name}_{hour}_{minute}_{int(next_run.timestamp())}"
+
+                # Add the job with cron trigger for weekly recurrence
+                if content.get("image_data"):
+                    # Schedule with image
+                    scheduler.add_job(
+                        post_to_linkedin,
+                        'cron',
+                        day_of_week=target_weekday,
+                        hour=hour,
+                        minute=minute,
+                        args=[content.get('content', ''), LINKEDIN_ACCESS_TOKEN, content.get('image_data')],
+                        id=job_id,
+                        replace_existing=True
+                    )
+                else:
+                    scheduler.add_job(
+                        post_to_linkedin,
+                        'cron',
+                        day_of_week=target_weekday,
+                        hour=hour,
+                        minute=minute,
+                        args=[content.get('content', ''), LINKEDIN_ACCESS_TOKEN],
+                        id=job_id,
+                        replace_existing=True
+                    )
+                print(f"   ✅ LinkedIn {day_name} posting scheduled successfully (ID: {job_id})")
+        
+        print(f"🚀 === SCHEDULING COMPLETE ===\n")
+                
+    except Exception as e:
+        print(f"   ❌ Error scheduling custom posts: {str(e)}")
+
+def schedule_daily_post(platform: str, content: dict, time: str, post_args=None):
+    """Schedule daily posting for LinkedIn"""
+    from datetime import datetime, timedelta
+    
+    try:
+        # Parse the time (e.g., "14:30")
+        hour, minute = map(int, time.split(':'))
+        
+        # Calculate next occurrence
+        now = datetime.now()
+        next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        # If the time has passed today, schedule for tomorrow
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        
+        print(f"   📅 Scheduling daily post for {platform} at {next_run}")
+        
+        # Import scheduler from social_media_posting
+        from app.social_media_posting import scheduler, post_to_linkedin, LINKEDIN_ACCESS_TOKEN
+
+        if platform.lower() == 'linkedin':
+            job_id = f"daily_linkedin_{int(next_run.timestamp())}"
+            if content.get("image_data"):
+                scheduler.add_job(
+                    post_to_linkedin,
+                    'interval',
+                    days=1,
+                    start_date=next_run,
+                    args=[content.get('content', ''), LINKEDIN_ACCESS_TOKEN, content.get('image_data')],
+                    id=job_id,
+                    replace_existing=True
+                )
+            else:
+                scheduler.add_job(
+                    post_to_linkedin,
+                    'interval',
+                    days=1,
+                    start_date=next_run,
+                    args=[content.get('content', ''), LINKEDIN_ACCESS_TOKEN],
+                    id=job_id,
+                    replace_existing=True
+                )
+            print(f"   ✅ LinkedIn daily posting scheduled successfully (ID: {job_id})")
+    except Exception as e:
+        print(f"   ❌ Error scheduling daily post: {str(e)}")
+
+def schedule_weekly_post(platform: str, content: dict, time: str, post_args=None):
+    """Schedule weekly posting for LinkedIn"""
+    from datetime import datetime, timedelta
+    
+    try:
+        # Parse the time
+        hour, minute = map(int, time.split(':'))
+        
+        # Calculate next Monday at the specified time
+        now = datetime.now()
+        days_ahead = 0 - now.weekday()  # Monday is 0
+        if days_ahead <= 0:  # Target day already happened this week
+            days_ahead += 7
+            
+        next_run = (now + timedelta(days=days_ahead)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        
+        print(f"   📅 Scheduling weekly post for {platform} at {next_run}")
+        
+        # Import scheduler from social_media_posting
+        from app.social_media_posting import scheduler, post_to_linkedin, LINKEDIN_ACCESS_TOKEN
+
+        if platform.lower() == 'linkedin':
+            job_id = f"weekly_linkedin_{int(next_run.timestamp())}"
+            if content.get("image_data"):
+                scheduler.add_job(
+                    post_to_linkedin,
+                    'interval',
+                    weeks=1,
+                    start_date=next_run,
+                    args=[content.get('content', ''), LINKEDIN_ACCESS_TOKEN, content.get('image_data')],
+                    id=job_id,
+                    replace_existing=True
+                )
+            else:
+                scheduler.add_job(
+                    post_to_linkedin,
+                    'interval',
+                    weeks=1,
+                    start_date=next_run,
+                    args=[content.get('content', ''), LINKEDIN_ACCESS_TOKEN],
+                    id=job_id,
+                    replace_existing=True
+                )
+            print(f"   ✅ LinkedIn weekly posting scheduled successfully (ID: {job_id})")
+    except Exception as e:
+        print(f"   ❌ Error scheduling weekly post: {str(e)}")
+
+# Add endpoint to manage LinkedIn auto-sharing schedules
+@app.get("/linkedin-schedules")
+async def get_linkedin_schedules():
+    """Get all active LinkedIn schedules"""
+    try:
+        from app.social_media_posting import scheduler
+        
+        linkedin_schedules = []
+        for job in scheduler.get_jobs():
+            if 'linkedin' in job.id.lower():
+                schedule_info = {
+                    "id": job.id,
+                    "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+                    "trigger_type": str(job.trigger.__class__.__name__),
+                    "trigger_details": str(job.trigger)
+                }
+                
+                # Determine schedule type
+                if 'daily' in job.id:
+                    schedule_info["frequency"] = "daily"
+                elif 'weekly' in job.id:
+                    schedule_info["frequency"] = "weekly"
+                elif 'custom' in job.id:
+                    schedule_info["frequency"] = "custom"
+                else:
+                    schedule_info["frequency"] = "one-time"
+                
+                linkedin_schedules.append(schedule_info)
+        
+        return {
+            "total_schedules": len(linkedin_schedules),
+            "schedules": linkedin_schedules
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting LinkedIn schedules: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.delete("/linkedin-schedules/{schedule_id}")
+async def cancel_linkedin_schedule(schedule_id: str):
+    """Cancel a specific LinkedIn schedule"""
+    try:
+        from app.social_media_posting import scheduler
+        
+        scheduler.remove_job(schedule_id)
+        return {"success": True, "message": f"LinkedIn schedule '{schedule_id}' cancelled successfully"}
+        
+    except Exception as e:
+        print(f"❌ Error cancelling LinkedIn schedule: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# In your current setup, the content for text/posts is generated by the PlannerAgent using the "grmini" output_type.
+# If your PlannerAgent uses Gemini (Google's Gemini model) under the hood, then the content shown in the frontend is generated by Gemini.
+
+# The response sent to the frontend contains:
+#   - "content": The generated text (from Gemini via PlannerAgent)
+#   - "type": The type of content, e.g., "text", "post", or "image"
+#   - "category": The category requested
+#   - "summary": (optional) summary of the task
+#   - "image_data": (only for images) base64 image data
+
+# The possible values for "type" in your API responses are:
+#   - "text"   : For plain text content (e.g., posts, captions, etc.)
+#   - "post"   : For social media post content (if your PlannerAgent returns this type)
+#   - "image"  : For generated images (either from Gemini, HuggingFace, or placeholder)
+
+# The frontend displays the content based on the "type" field:
+#   - If "type" is "image" and "image_data" is present, it shows the image.
+#   - If "type" is "text" or "post", it shows the text content.
+
+# To test the /generate-with-answers endpoint with Postman, use the following POST request:
+# URL: http://localhost:8000/generate-with-answers
+# Method: POST
+# Headers: Content-Type: application/json
+# Body (raw, JSON):
+# {
+#   "answers": {
+#     "category": "Technology",
+#     "description": "Latest AI trends for business"
+#   }
+# }
+#
+# Or, if your frontend sends a list:
+# {
+#   "answers": [
+#     {"category": "Technology"},
+#     {"description": "Latest AI trends for business"}
+#   ]
+# }
+#
+# You should receive a response like:
+# {
+#   "content": "...generated text...",
+#   "category": "Technology",
+#   "type": "text",
+#   "summary": "...summary..."
+# }
+#
+# If you POST this with Postman and get a valid JSON response with "content", "type", and "category", 
+# then the backend is working and the issue is in the frontend display logic.
+# If you get an error or empty content, check the PlannerAgent's generate_content method and logs.
